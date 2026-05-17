@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Estudio del Tiempo | Radio Maitino</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        body {
+            background-color: #0b0f19;
+            margin: 0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            font-family: system-ui, -apple-system, sans-serif;
+            color: #fff;
+        }
+        .container {
+            text-align: center;
+            background: #111827;
+            padding: 30px;
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            border: 1px solid #1f2937;
+            width: 350px;
+        }
+        h1 {
+            font-size: 1.2rem;
+            margin-bottom: 10px;
+            color: #38bdf8;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        #status {
+            color: #9ca3af;
+            font-size: 14px;
+            margin-top: 15px;
+            line-height: 1.4;
+            min-height: 40px;
+        }
+        .pulse {
+            width: 12px;
+            height: 12px;
+            background-color: #10b981;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+        }
+        .pulse.broadcasting {
+            background-color: #ef4444;
+            animation: blink 1.5s infinite;
+        }
+        @keyframes blink {
+            0% { opacity: 1; }
+            50% { opacity: 0.4; }
+            100% { opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1><span id="indicator" class="pulse"></span>Estudio del Tiempo</h1>
+        <div id="status">Iniciando sistema P2P...</div>
+    </div>
+
+    <script>
+        const MASTER_ID = 'maitino-studio-host';
+        const statusText = document.getElementById('status');
+        const indicator = document.getElementById('indicator');
+
+        let peer = null;
+        let audioCtx = null;
+        let streamDestination = null;
+        let ttsPlayer = new Audio();
+        ttsPlayer.crossOrigin = "anonymous";
+        let mediaSourceNode = null;
+
+        let isBroadcasting = false;
+        let weatherChunks = [];
+        let currentChunkIndex = 0;
+        let activeCall = null;
+
+        // 1. Inicializa el entorno de audio profesional y crea el puente de grabación digital
+        function initAudio() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                streamDestination = audioCtx.createMediaStreamDestination();
+                
+                // Enlazamos el reproductor de voz al puente de transmisión de red
+                mediaSourceNode = audioCtx.createMediaElementSource(ttsPlayer);
+                mediaSourceNode.connect(streamDestination);
+                mediaSourceNode.connect(audioCtx.destination); // También se escuchará en local
+            }
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+        }
+
+        // 2. Levanta el servidor PeerJS esperando a la Radio receptora
+        function iniciarServidorPeer() {
+            peer = new Peer(MASTER_ID, { config: { 'iceServers': [{ urls: 'stun:stun.l.google.com:19302' }] } });
+
+            peer.on('open', () => {
+                statusText.innerText = "Estudio del clima listo de forma independiente.\nEsperando orden de la radio...";
+            });
+
+            peer.on('connection', (conn) => {
+                conn.on('data', async (data) => {
+                    // Cuando el código receptor de la radio ejecute el comando 'check_live'
+                    if (data.command === 'check_live') {
+                        if (!isBroadcasting) {
+                            isBroadcasting = true;
+                            indicator.classList.add('broadcasting');
+                            statusText.innerText = "Radio detectada.\nGenerando boletín de audio HD...";
+                            
+                            await transmitirBoletin(conn.peer);
+                        }
+                    }
+                });
+            });
+
+            peer.on('error', (err) => {
+                console.error("Error en PeerJS:", err);
+                statusText.innerText = "Error de señal. Reiniciando enlace en 5 segundos...";
+                setTimeout(iniciarServidorPeer, 5000);
+            });
+        }
+
+        // 3. Genera la sintonía inicial/final y la inyecta al flujo de red
+        function playArpeggio(callback) {
+            initAudio();
+            const notes = [261.63, 329.63, 392.00, 523.25]; // Do, Mi, Sol, Do
+            let startTime = audioCtx.currentTime;
+
+            notes.forEach((freq, index) => {
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                osc.type = 'sine';
+                
+                osc.connect(gain);
+                gain.connect(audioCtx.destination);
+                gain.connect(streamDestination); // Envío directo y puro a la línea P2P
+
+                osc.frequency.value = freq;
+                let t = startTime + (index * 0.15);
+                gain.gain.setValueAtTime(0, t);
+                gain.gain.linearRampToValueAtTime(0.20, t + 0.05);
+                gain.gain.exponentialRampToValueAtTime(0.001, t + 1.2);
+                osc.start(t);
+                osc.stop(t + 1.5);
+            });
+            setTimeout(callback, 1200);
+        }
+
+        // 4. Descarga los datos meteorológicos en tiempo real y arma la cadena de audio
+        async function transmitirBoletin(radioPeerId) {
+            try {
+                initAudio();
+                
+                const res = await fetch('https://wttr.in/Maitino?format=j1&lang=es');
+                const data = await res.json();
+                const current = data.current_condition[0];
+                const today = data.weather[0];
+                const tomorrow = data.weather[1];
+                const day3 = data.weather[2];
+                const ahora = new Date();
+                const hour = ahora.getHours();
+                const mins = ahora.getMinutes().toString().padStart(2, '0');
+                const dateStr = ahora.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+
+                let faseDia = (hour >= 20 || hour < 6) ? "la noche" : (hour < 13) ? "la mañana" : "la tarde";
+                let horaIndex = (hour >= 20 || hour < 2) ? 7 : (hour < 7) ? 1 : (hour < 13) ? 3 : 5;
+
+                const condProximasHoras = today.hourly[horaIndex].lang_es[0].value.toLowerCase();
+                const condManana = tomorrow.hourly[4].lang_es[0].value.toLowerCase();
+                const nextDayDate = new Date(ahora.getTime() + 86400000 * 2);
+                const nameDay3 = nextDayDate.toLocaleDateString('es-ES', { weekday: 'long' });
+                const condDay3 = day3.hourly[4].lang_es[0].value.toLowerCase();
+
+                const guionText = `
+                SERVICIO METEOROLÓGICO DE RADIO MAITINO.
+                Boletín actualizado para hoy, ${dateStr}. Son las ${hour} horas y ${mins} minutos.
+                En este momento, los cielos se presentan ${current.lang_es[0].value.toLowerCase()}s. Los termómetros registran ${current.temp_C} grados, el viento se sitúa en ${current.windspeedKmph} kilómetros por hora y la sensación térmica es de ${current.FeelsLikeC} grados. Humedad del ${current.humidity} por ciento.
+                De cara a las próximas horas de ${faseDia}, el pronóstico indica condiciones de ${condProximasHoras}. Las temperaturas alcanzarán hoy un máximo de ${today.maxtempC} grados.
+                Para mañana: prevemos un escenario dominado por ${condManana} con temperaturas entre ${tomorrow.mintempC} y ${tomorrow.maxtempC} grados.
+                Próximo ${nameDay3}: cielos ${condDay3}s y temperaturas de ${day3.mintempC} a ${day3.maxtempC} grados.
+                Es una información de la Agencia Meteorológica de Maitino.`;
+
+                // Fragmentamos el texto para evitar el límite de caracteres de la API y lograr una dicción fluida
+                weatherChunks = splitTextIntoChunks(guionText);
+                currentChunkIndex = 0;
+
+                // Establecemos la llamada P2P enviando el flujo de audio directo mezclado
+                activeCall = peer.call(radioPeerId, streamDestination.stream);
+
+                // Arrancamos la emisión: Sintonía -> Locución Continua -> Sintonía de Cierre
+                playArpeggio(() => {
+                    reproducirFragmentosVoz(() => {
+                        playArpeggio(() => {
+                            finalizarTransmision();
+                        });
+                    });
+                });
+
+            } catch (e) {
+                console.error("Error al procesar emisión del clima:", e);
+                finalizarTransmision();
+            }
+        }
+
+        // Corta el texto inteligentemente respetando puntos y comas para que suene natural
+        function splitTextIntoChunks(text) {
+            const sentences = text.split(/([.,;:\n]+)/);
+            const chunks = [];
+            let currentChunk = "";
+            
+            for (let i = 0; i < sentences.length; i++) {
+                let part = sentences[i];
+                if (!part) continue;
+                
+                if ((currentChunk + part).length > 160) {
+                    if (currentChunk.trim()) chunks.push(currentChunk.trim());
+                    currentChunk = part;
+                } else {
+                    currentChunk += part;
+                }
+            }
+            if (currentChunk.trim()) chunks.push(currentChunk.trim());
+            return chunks.filter(c => c.length > 1 && /[a-zA-Z0-9]/.test(c));
+        }
+
+        // Lector encadenado de alta fidelidad de Google TTS (Formato Audio nativo)
+        function reproducirFragmentosVoz(onComplete) {
+            if (currentChunkIndex >= weatherChunks.length) {
+                onComplete();
+                return;
+            }
+
+            let textoFrase = weatherChunks[currentChunkIndex];
+            statusText.innerText = `Emitiendo voz digital al aire:\n"${textoFrase.substring(0, 45)}..."`;
+
+            // Al usar la pasarela de Google TTS de forma binaria, el sonido se procesa como flujo de audio puro transmitible
+            ttsPlayer.src = `https://translate.google.com/translate_tts?ie=UTF-8&tl=es&client=tw-ob&q=${encodeURIComponent(textoFrase)}`;
+            ttsPlayer.play().catch(e => console.error("Error cargando pista de voz:", e));
+
+            ttsPlayer.onended = () => {
+                currentChunkIndex++;
+                setTimeout(() => {
+                    reproducirFragmentosVoz(onComplete);
+                }, 350); // Pausa realista de respiración entre frases de locución
+            };
+        }
+
+        function finalizarTransmision() {
+            if (activeCall) {
+                activeCall.close();
+                activeCall = null;
+            }
+            isBroadcasting = false;
+            indicator.classList.remove('broadcasting');
+            statusText.innerText = "Boletín meteorológico finalizado.\nEsperando nueva sincronización horaria...";
+        }
+
+        iniciarServidorPeer();
+    </script>
+</body>
+</html>
